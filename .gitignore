@@ -1,6 +1,3 @@
-# Ignore scraper output folders
-ss_scrape_*/
-
 # Python
 __pycache__/
 *.py[cod]
