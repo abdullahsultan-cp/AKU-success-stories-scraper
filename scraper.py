@@ -75,6 +75,18 @@ def safe_text(s: str) -> str:
     return s
 
 
+def sanitize_filename(filename: str) -> str:
+    """Convert title to safe filename."""
+    # Remove invalid characters
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    # Replace spaces with underscores
+    filename = filename.replace(' ', '_')
+    # Remove leading/trailing dots and spaces
+    filename = filename.strip('. ')
+    # Limit length
+    return filename[:200] if filename else "story"
+
+
 def normalize_url(url: str, page_base: str) -> str:
     if not url:
         return ""
@@ -177,15 +189,19 @@ def extract_body_text(soup: BeautifulSoup) -> str:
     
     if not content_div:
         # Fallback: get all paragraphs
-        ps = soup.find_all('p')
+        blocks = soup.find_all(['p', 'em'])
     else:
-        ps = content_div.find_all('p')
+        # Get <p> and <em> in document order so we keep intro/bio lines (often in <em>)
+        blocks = content_div.find_all(['p', 'em'])
     
     paragraphs = []
-    for p in ps:
-        text = safe_text(p.get_text())
-        # Skip short lines (likely nav/footer)
-        if text and len(text) > 20:
+    for tag in blocks:
+        # Only include <em> if it's a standalone block (e.g. intro or author bio), not inside a <p>
+        if tag.name == 'em' and tag.find_parent('p'):
+            continue
+        text = safe_text(tag.get_text())
+        # Keep any non-empty block (include short lines like intro and bio)
+        if text and len(text.strip()) >= 3:
             paragraphs.append(text)
     
     return '\n\n'.join(paragraphs)
@@ -242,6 +258,46 @@ def fetch_html(url: str, timeout: int = 60) -> str:
     r = requests.get(url, headers=headers, timeout=timeout)
     r.raise_for_status()
     return r.text
+
+
+def download_image(image_url: str, save_path: Path, filename_base: str) -> Optional[str]:
+    """Download image from URL and save to local path with given filename. Returns local path or None."""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        r = requests.get(image_url, headers=headers, timeout=30)
+        r.raise_for_status()
+        
+        # Determine file extension from content-type or URL
+        content_type = r.headers.get('content-type', '').lower()
+        ext = '.jpg'
+        if 'png' in content_type:
+            ext = '.png'
+        elif 'webp' in content_type:
+            ext = '.webp'
+        elif 'gif' in content_type:
+            ext = '.gif'
+        else:
+            # Try to get from URL
+            for e in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
+                if e in image_url.lower():
+                    ext = e
+                    break
+        
+        filename = f"{filename_base}{ext}"
+        filepath = save_path / filename
+        
+        # Handle filename conflicts
+        counter = 1
+        while filepath.exists():
+            filepath = save_path / f"{filename_base}_{counter}{ext}"
+            counter += 1
+        
+        filepath.write_bytes(r.content)
+        return str(filepath.relative_to(save_path.parent.parent))
+    except Exception as e:
+        return None
 
 
 # ----------------------------
@@ -315,6 +371,10 @@ def main():
         'saved_files': [],
     }
 
+    # Create images folder
+    images_folder = paths.output / 'images'
+    images_folder.mkdir(exist_ok=True)
+
     for idx, url in enumerate(urls, start=1):
         logger.info(f'\n[{idx}/{len(urls)}] Scraping: {url}')
 
@@ -323,9 +383,18 @@ def main():
         except HTTPError as he:
             resp = getattr(he, 'response', None)
             code = resp.status_code if resp is not None else None
-            logger.error(f'❌ PAGE SKIP (HTTP {code}): {url}')
+            
+            error_obj = {'url': url, 'type': 'HTTPError', 'code': code}
+            
+            # Check if credentials are required
+            if code == 401:
+                logger.error(f'❌ PAGE SKIP (HTTP {code} - Credentials Required): {url}')
+                error_obj['reason'] = 'Page requires authentication/credentials'
+            else:
+                logger.error(f'❌ PAGE SKIP (HTTP {code}): {url}')
+            
             summary['failed'] += 1
-            summary['errors'].append({'url': url, 'type': 'HTTPError', 'code': code})
+            summary['errors'].append(error_obj)
             continue
         except (Timeout, ConnectionError, SSLError) as e:
             logger.error(f'❌ PAGE SKIP (Network): {url} | {type(e).__name__}')
@@ -341,8 +410,28 @@ def main():
         # Parse
         story = parse_story_html(html, url)
 
-        # Save as JSON
-        output_file = paths.output / f'story_{idx}.json'
+        # Generate filename from title
+        safe_title = sanitize_filename(story.title)
+
+        # Download hero image if available
+        local_image_path = None
+        if story.hero_image:
+            logger.info(f'   Downloading image: {story.hero_image}')
+            local_image_path = download_image(story.hero_image, images_folder, safe_title)
+            if local_image_path:
+                logger.info(f'   Image saved: {local_image_path}')
+            else:
+                logger.warning(f'   Failed to download image')
+
+        output_file = paths.output / f'{safe_title}.json'
+        
+        # Handle filename conflicts
+        counter = 1
+        base_file = output_file
+        while output_file.exists():
+            output_file = paths.output / f'{safe_title}_{counter}.json'
+            counter += 1
+
         output_file.write_text(
             json.dumps(
                 {
@@ -351,7 +440,7 @@ def main():
                     'date': story.date,
                     'description': story.description,
                     'body_text': story.body_text,
-                    'hero_image': story.hero_image,
+                    'hero_image': local_image_path or story.hero_image,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -362,7 +451,7 @@ def main():
         logger.info(f'✅ Saved: {output_file.name}')
         logger.info(f'   Title: {story.title}')
         logger.info(f'   Date: {story.date}')
-        logger.info(f'   Hero image: {story.hero_image is not None}')
+        logger.info(f'   Hero image: {local_image_path if local_image_path else ("URL only" if story.hero_image else "None")}')
         logger.info(f'   Body text length: {len(story.body_text)} chars')
 
         summary['success'] += 1
@@ -370,6 +459,7 @@ def main():
             'url': url,
             'filename': output_file.name,
             'title': story.title,
+            'hero_image': local_image_path,
         })
 
     # Save summary
