@@ -1,52 +1,95 @@
-# Success Stories Scraper
+# Success Stories – Scrape & Upload to Storyblok
 
-A dedicated scraper for AKU Pakistan Success Stories section.
-
-Scrapes and saves success story data (title, body text, images) locally as JSON files.
+Scrape AKU Pakistan Success Stories and upload them to Storyblok. One script does both.
 
 ## Prerequisites
 
 - Python 3.7+
-- pip (Python package manager)
+- pip
 
 ## Setup
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Or install manually
-pip install requests beautifulsoup4 python-dotenv
+# Or: pip install requests beautifulsoup4 python-dotenv
 ```
 
-## Usage
+Create a `.env` in this folder (required for upload):
 
-**Scrape single story:**
+```
+STORYBLOK_TOKEN=your_management_api_token
+STORYBLOK_SPACE_ID=your_space_id
+```
+
+---
+
+## Combined script: `run.py`
+
+**Scrape and upload in one go (default):**
+
 ```bash
-python scraper.py --link "https://hospitals.aku.edu/pakistan/success-stories/Pages/a-womans-dream.aspx"
+# One URL
+python run.py --link "https://hospitals.aku.edu/pakistan/success-stories/Pages/a-journey-of-strength.aspx"
+
+# From file (one URL per line)
+python run.py --links-file links.txt
+
+# Multiple URLs
+python run.py --link "url1" --link "url2" --links-file links.txt
 ```
 
-**Scrape from file (one URL per line):**
+This creates a timestamped folder (e.g. `ss_scrape_2026-02-11_025239AM/`), saves JSON + images under `output/`, then uploads each story to Storyblok under **Root → Automation → success-stories**.
+
+**Scrape only (no upload):**
+
 ```bash
-python scraper.py --links-file all_urls.txt
+python run.py --links-file links.txt --scrape-only
 ```
 
-**Combine both:**
+**Upload only** (e.g. re-upload a previous run):
+
 ```bash
-python scraper.py --link "url1" --link "url2" --links-file all_urls.txt
+# Upload all JSONs in a folder
+python run.py --upload-only "ss_scrape_2026-02-11_025239AM/output"
+
+# Upload a single JSON file
+python run.py --upload-only "ss_scrape_2026-02-11_025239AM/output/Story_Title.json"
 ```
 
-## Output
+**Options:**
 
-Creates a timestamped folder like `ss_scrape_2026-02-08_115122PM/` with:
-- `output/` - JSON files (story_1.json, story_2.json, ...)
-- `summary.json` - Stats and file list
-- `links_used.txt` - All URLs processed
+| Option | Description |
+|--------|-------------|
+| `--publish` | Publish stories in Storyblok (default: draft) |
+| `--asset-folder-id ID` | Put uploaded images in this Storyblok asset folder |
 
-Each JSON file contains:
-- `source_url` - Original page URL
-- `title` - Article title
-- `date` - Publication date (if found)
-- `description` - Meta description
-- `body_text` - Full article text (all paragraphs)
-- `hero_image` - Main story image URL
+---
+
+## Output (scrape)
+
+Each run folder contains:
+
+- **output/** – one JSON per story (filename from title) and **output/images/** with hero images
+- **summary.json** – success/fail counts
+- **links_used.txt** – URLs processed
+
+JSON fields: `source_url`, `title`, `date`, `description`, `body_text` (paragraphs with `\n\n`), `hero_image` (local path).
+
+Paragraph structure from the page is preserved (intro, body, author bio), including lines in `<em>`.
+
+---
+
+## Config in `run.py`
+
+- **CONTENT_PATH** – Storyblok folder path (default: `["Automation", "success-stories"]`)
+- **CONTENT_TYPE** – Storyblok content type (default: `"success_story"`)
+- **FIELD_TITLE**, **FIELD_DESCRIPTION**, **FIELD_IMAGE** – field names (change if your schema differs)
+
+---
+
+## Separate scripts (optional)
+
+- **scraper.py** – scrape only (same behavior as `run.py --scrape-only`)
+- **uploader.py** – upload a single JSON (same as `run.py --upload-only path/to/file.json`)
+
+Use them if you prefer to keep scrape and upload as separate steps or scripts.
